@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
 abstract class Controller
@@ -23,11 +24,28 @@ abstract class Controller
             ], 401));
         }
 
-        $user = DB::table('users')
-            ->whereRaw('UPPER(LTRIM(RTRIM(USER_CODE))) = ?', [$userCode])
-            ->first();
+        $access = Cache::remember(
+            'module_access:v1:' . sha1($userCode),
+            120,
+            function () use ($userCode) {
+                $user = DB::table('users')
+                    ->whereRaw('UPPER(LTRIM(RTRIM(USER_CODE))) = ?', [$userCode])
+                    ->first();
 
-        if (!$user) {
+                if (!$user) {
+                    return null;
+                }
+
+                $row = array_change_key_case((array) $user, CASE_LOWER);
+
+                return [
+                    'row' => $row,
+                    'modules' => $this->getAssignedModulesForRow($row),
+                ];
+            }
+        );
+
+        if (!$access) {
             throw new HttpResponseException(response()->json([
                 'success' => false,
                 'status' => 'error',
@@ -35,8 +53,8 @@ abstract class Controller
             ], 401));
         }
 
-        $row = array_change_key_case((array) $user, CASE_LOWER);
-        $modules = $this->getAssignedModulesForRow($row);
+        $row = $access['row'];
+        $modules = $access['modules'];
 
         if (!in_array($module, $modules, true)) {
             throw new HttpResponseException(response()->json([

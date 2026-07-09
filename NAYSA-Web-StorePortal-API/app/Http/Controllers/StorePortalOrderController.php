@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Http\Exceptions\HttpResponseException;
@@ -10,10 +11,28 @@ use Carbon\Carbon;
 
 class StorePortalOrderController extends Controller
 {
+    private const CACHE_PREFIX = 'store_portal_order:v1';
+
     private function execStorePortalSproc(Request $request, string $mode, array $jsonData)
     {
         $this->authorizeModuleAccess($request, self::MODULE_STORE_PORTAL);
 
+        return $this->runStorePortalSproc($mode, $jsonData);
+    }
+
+    private function cachedStorePortalSproc(Request $request, string $mode, array $jsonData, int $ttlSeconds)
+    {
+        $this->authorizeModuleAccess($request, self::MODULE_STORE_PORTAL);
+
+        return Cache::remember(
+            $this->storePortalCacheKey($mode, $jsonData),
+            $ttlSeconds,
+            fn () => $this->runStorePortalSproc($mode, $jsonData)
+        );
+    }
+
+    private function runStorePortalSproc(string $mode, array $jsonData)
+    {
         $params = json_encode([
             'json_data' => $jsonData
         ]);
@@ -52,6 +71,45 @@ class StorePortalOrderController extends Controller
         return json_decode(json_encode($rows), true);
     }
 
+    private function storePortalCacheKey(string $mode, array $jsonData): string
+    {
+        $payload = $this->normalizeCachePayload($jsonData);
+
+        if (in_array($mode, ['LoadWeeklyForecast', 'LoadWeeklyForecastHistory', 'LoadConfirmation'], true)) {
+            $payload['_storeCacheVersion'] = $this->storePortalOrderCacheVersion($jsonData['storeCode'] ?? '');
+        }
+
+        return self::CACHE_PREFIX . ':' . $mode . ':' . sha1(json_encode($payload));
+    }
+
+    private function normalizeCachePayload(array $payload): array
+    {
+        ksort($payload);
+
+        foreach ($payload as $key => $value) {
+            if (is_array($value)) {
+                $payload[$key] = $this->normalizeCachePayload($value);
+            }
+        }
+
+        return $payload;
+    }
+
+    private function storePortalOrderCacheVersion(string $storeCode): string
+    {
+        return (string) Cache::get($this->storePortalOrderCacheVersionKey($storeCode), '0');
+    }
+
+    private function bumpStorePortalOrderCacheVersion(string $storeCode): void
+    {
+        Cache::put($this->storePortalOrderCacheVersionKey($storeCode), now()->format('Uu'), now()->addDay());
+    }
+
+    private function storePortalOrderCacheVersionKey(string $storeCode): string
+    {
+        return self::CACHE_PREFIX . ':store-version:' . sha1(strtoupper(trim($storeCode)));
+    }
+
     public function storeContext(Request $request)
     {
         $validator = Validator::make($request->all(), [
@@ -66,10 +124,10 @@ class StorePortalOrderController extends Controller
             ], 422);
         }
 
-        $data = $this->execStorePortalSproc($request, 'GetStoreContext', [
+        $data = $this->cachedStorePortalSproc($request, 'GetStoreContext', [
             'userCode' => $request->userCode,
             'storeCode' => $request->storeCode,
-        ]);
+        ], 600);
 
         return response()->json([
             'message' => 'Store context loaded successfully.',
@@ -91,10 +149,10 @@ class StorePortalOrderController extends Controller
             ], 422);
         }
 
-        $data = $this->execStorePortalSproc($request, 'GetItems', [
+        $data = $this->cachedStorePortalSproc($request, 'GetItems', [
             'userCode' => $request->userCode,
             'storeCode' => $request->storeCode,
-        ]);
+        ], 600);
 
         return response()->json([
             'message' => 'Items loaded successfully.',
@@ -120,13 +178,13 @@ class StorePortalOrderController extends Controller
 
         // Retrieval is allowed for any date range so old/past saved quantities
         // can still be loaded. Saving is also allowed for any forecast day count.
-        $data = $this->execStorePortalSproc($request, 'LoadWeeklyForecast', [
+        $data = $this->cachedStorePortalSproc($request, 'LoadWeeklyForecast', [
             'userCode' => $request->userCode,
             'storeCode' => $request->storeCode,
             'startDate' => $request->startDate,
             'endDate' => $request->endDate,
             'orderType' => $request->orderType ?? 'WeeklyForecast',
-        ]);
+        ], 60);
 
         return response()->json([
             'message' => 'Weekly forecast loaded successfully.',
@@ -150,13 +208,13 @@ class StorePortalOrderController extends Controller
         }
 
         // History retrieval may be more than seven days.
-        $data = $this->execStorePortalSproc($request, 'LoadWeeklyForecastHistory', [
+        $data = $this->cachedStorePortalSproc($request, 'LoadWeeklyForecastHistory', [
             'userCode' => $request->userCode,
             'storeCode' => $request->storeCode,
             'startDate' => $request->startDate,
             'endDate' => $request->endDate,
             'orderType' => 'WeeklyForecast',
-        ]);
+        ], 60);
 
         return response()->json([
             'message' => 'Weekly forecast history loaded successfully.',
@@ -224,6 +282,8 @@ class StorePortalOrderController extends Controller
             'details' => $details,
         ]);
 
+        $this->bumpStorePortalOrderCacheVersion($request->storeCode);
+
         return response()->json([
             'message' => 'Weekly forecast submitted successfully.',
             'data' => $result,
@@ -248,12 +308,12 @@ class StorePortalOrderController extends Controller
             ], 422);
         }
 
-        $data = $this->execStorePortalSproc($request, 'LoadConfirmation', [
+        $data = $this->cachedStorePortalSproc($request, 'LoadConfirmation', [
             'userCode' => $request->userCode,
             'storeCode' => $request->storeCode,
             'deliveryDate' => $request->deliveryDate,
             'forecastDateOrder' => $request->deliveryDate,
-        ]);
+        ], 30);
 
         return response()->json([
             'message' => 'Forecast loaded for confirmation.',
@@ -318,6 +378,8 @@ class StorePortalOrderController extends Controller
             'orderType' => $request->orderType,
             'details' => $details,
         ]);
+
+        $this->bumpStorePortalOrderCacheVersion($request->storeCode);
 
         return response()->json([
             'message' => 'Order confirmed and transmitted to NAYSA Financials successfully.',
