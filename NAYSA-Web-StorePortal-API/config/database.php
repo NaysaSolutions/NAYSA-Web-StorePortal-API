@@ -114,6 +114,19 @@ return [
             // 'trust_server_certificate' => env('DB_TRUST_SERVER_CERTIFICATE', 'false'),
         ],
 
+        'tenant' => [
+            'driver' => 'sqlsrv',
+            'url' => env('TENANT_DB_URL', env('DB_URL')),
+            'host' => env('TENANT_DB_HOST', env('DB_HOST', 'SQL5107.site4now.net')),
+            'port' => env('TENANT_DB_PORT', env('DB_PORT', '1433')),
+            'database' => env('TENANT_DB_DATABASE', env('DB_DATABASE', 'db_a9be64_naysacloudcomp1')),
+            'username' => env('TENANT_DB_USERNAME', env('DB_USERNAME', 'db_a9be64_naysacloudcomp1_admin')),
+            'password' => env('TENANT_DB_PASSWORD', env('DB_PASSWORD', 'P@ssw0rd')),
+            'charset' => env('TENANT_DB_CHARSET', env('DB_CHARSET', 'utf8')),
+            'prefix' => '',
+            'prefix_indexes' => true,
+        ],
+
     ],
 
     /*

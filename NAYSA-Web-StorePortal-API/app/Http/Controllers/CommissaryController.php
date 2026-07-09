@@ -10,8 +10,10 @@ use Carbon\Carbon;
 
 class CommissaryController extends Controller
 {
-    private function execCommissarySproc(string $mode, array $jsonData = []): array
+    private function execCommissarySproc(Request $request, string $mode, array $jsonData = []): array
     {
+        $this->authorizeModuleAccess($request, self::MODULE_COMMISSARY);
+
         $params = json_encode([
             'json_data' => $jsonData,
         ]);
@@ -60,7 +62,7 @@ class CommissaryController extends Controller
 
     public function getCategories(Request $request)
     {
-        $data = $this->execCommissarySproc('CategoryList');
+        $data = $this->execCommissarySproc($request, 'CategoryList');
 
         return response()->json([
             'message' => 'Commissary categories loaded successfully.',
@@ -83,7 +85,7 @@ class CommissaryController extends Controller
             ], 422);
         }
 
-        $data = $this->execCommissarySproc('QuerySummary', [
+        $data = $this->execCommissarySproc($request, 'QuerySummary', [
             'startDate' => Carbon::parse($request->startDate)->toDateString(),
             'endDate' => Carbon::parse($request->endDate)->toDateString(),
             'category' => $request->filled('category') ? $request->category : 'All',
@@ -110,7 +112,7 @@ class CommissaryController extends Controller
             ], 422);
         }
 
-        $data = $this->execCommissarySproc('QueryDetailed', [
+        $data = $this->execCommissarySproc($request, 'QueryDetailed', [
             'startDate' => Carbon::parse($request->startDate)->toDateString(),
             'endDate' => Carbon::parse($request->endDate)->toDateString(),
             'category' => $request->filled('category') ? $request->category : 'All',

@@ -10,8 +10,10 @@ use Carbon\Carbon;
 
 class StorePortalOrderController extends Controller
 {
-    private function execStorePortalSproc(string $mode, array $jsonData)
+    private function execStorePortalSproc(Request $request, string $mode, array $jsonData)
     {
+        $this->authorizeModuleAccess($request, self::MODULE_STORE_PORTAL);
+
         $params = json_encode([
             'json_data' => $jsonData
         ]);
@@ -64,7 +66,7 @@ class StorePortalOrderController extends Controller
             ], 422);
         }
 
-        $data = $this->execStorePortalSproc('GetStoreContext', [
+        $data = $this->execStorePortalSproc($request, 'GetStoreContext', [
             'userCode' => $request->userCode,
             'storeCode' => $request->storeCode,
         ]);
@@ -89,7 +91,7 @@ class StorePortalOrderController extends Controller
             ], 422);
         }
 
-        $data = $this->execStorePortalSproc('GetItems', [
+        $data = $this->execStorePortalSproc($request, 'GetItems', [
             'userCode' => $request->userCode,
             'storeCode' => $request->storeCode,
         ]);
@@ -118,7 +120,7 @@ class StorePortalOrderController extends Controller
 
         // Retrieval is allowed for any date range so old/past saved quantities
         // can still be loaded. Saving is also allowed for any forecast day count.
-        $data = $this->execStorePortalSproc('LoadWeeklyForecast', [
+        $data = $this->execStorePortalSproc($request, 'LoadWeeklyForecast', [
             'userCode' => $request->userCode,
             'storeCode' => $request->storeCode,
             'startDate' => $request->startDate,
@@ -148,7 +150,7 @@ class StorePortalOrderController extends Controller
         }
 
         // History retrieval may be more than seven days.
-        $data = $this->execStorePortalSproc('LoadWeeklyForecastHistory', [
+        $data = $this->execStorePortalSproc($request, 'LoadWeeklyForecastHistory', [
             'userCode' => $request->userCode,
             'storeCode' => $request->storeCode,
             'startDate' => $request->startDate,
@@ -213,7 +215,7 @@ class StorePortalOrderController extends Controller
             ], 422);
         }
 
-        $result = $this->execStorePortalSproc('SaveWeeklyForecast', [
+        $result = $this->execStorePortalSproc($request, 'SaveWeeklyForecast', [
             'userCode' => $userCode,
             'storeCode' => $request->storeCode,
             'startDate' => Carbon::parse($request->startDate)->toDateString(),
@@ -246,7 +248,7 @@ class StorePortalOrderController extends Controller
             ], 422);
         }
 
-        $data = $this->execStorePortalSproc('LoadConfirmation', [
+        $data = $this->execStorePortalSproc($request, 'LoadConfirmation', [
             'userCode' => $request->userCode,
             'storeCode' => $request->storeCode,
             'deliveryDate' => $request->deliveryDate,
@@ -308,7 +310,7 @@ class StorePortalOrderController extends Controller
             ->sort()
             ->first() ?? $requestDeliveryDate;
 
-        $result = $this->execStorePortalSproc('ConfirmOrder', [
+        $result = $this->execStorePortalSproc($request, 'ConfirmOrder', [
             'userCode' => $request->userCode,
             'storeCode' => $request->storeCode,
             'deliveryDate' => $headerDeliveryDate,
@@ -338,7 +340,7 @@ class StorePortalOrderController extends Controller
             ], 422);
         }
 
-        $data = $this->execStorePortalSproc('QuerySummary', [
+        $data = $this->execStorePortalSproc($request, 'QuerySummary', [
             'startDate' => $request->startDate,
             'endDate' => $request->endDate,
             'orderType' => $request->orderType,
@@ -365,7 +367,7 @@ class StorePortalOrderController extends Controller
             ], 422);
         }
 
-        $data = $this->execStorePortalSproc('QueryDetail', [
+        $data = $this->execStorePortalSproc($request, 'QueryDetail', [
             'startDate' => $request->startDate,
             'endDate' => $request->endDate,
             'orderType' => $request->orderType,
