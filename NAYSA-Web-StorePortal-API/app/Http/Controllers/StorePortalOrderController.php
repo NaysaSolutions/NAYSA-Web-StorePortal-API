@@ -11,7 +11,7 @@ use Carbon\Carbon;
 
 class StorePortalOrderController extends Controller
 {
-    private const CACHE_PREFIX = 'store_portal_order:v1';
+    private const CACHE_PREFIX = 'store_portal_order:v2';
 
     private function execStorePortalSproc(Request $request, string $mode, array $jsonData)
     {
@@ -65,7 +65,16 @@ class StorePortalOrderController extends Controller
                 ], 422));
             }
 
-            return $decoded ?? [];
+            $data = $decoded ?? [];
+
+            // Some database versions return every saved Weekly Forecast
+            // revision. Only return the newest row per Store + Item + Date to
+            // the entry grid; the history endpoint intentionally keeps all rows.
+            if ($mode === 'LoadWeeklyForecast' && is_array($data) && array_is_list($data)) {
+                return $this->latestWeeklyForecastRows($data);
+            }
+
+            return $data;
         }
 
         return json_decode(json_encode($rows), true);
@@ -93,6 +102,127 @@ class StorePortalOrderController extends Controller
         }
 
         return $payload;
+    }
+
+    private function latestWeeklyForecastRows(array $rows): array
+    {
+        $latestRows = [];
+
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $storeCode = (string) $this->forecastRowValue($row, ['storeCode', 'STORE_CODE'], '');
+            $itemCode = (string) $this->forecastRowValue(
+                $row,
+                ['itemCode', 'ITEM_CODE', 'item_code', 'ITEM_NO'],
+                ''
+            );
+            $deliveryDate = (string) $this->forecastRowValue(
+                $row,
+                ['deliveryDate', 'DELIVERY_DATE', 'delivery_date', 'ORDER_DATE'],
+                ''
+            );
+
+            if ($itemCode === '' || $deliveryDate === '') {
+                continue;
+            }
+
+            try {
+                $deliveryDate = Carbon::parse($deliveryDate)->toDateString();
+            } catch (\Throwable $e) {
+                // Keep the database value when it cannot be parsed.
+            }
+
+            $key = strtoupper(trim($storeCode))
+                . '|' . strtoupper(trim($itemCode))
+                . '|' . $deliveryDate;
+
+            if (!isset($latestRows[$key]) || $this->isNewerForecastRow($row, $latestRows[$key])) {
+                $latestRows[$key] = $row;
+            }
+        }
+
+        return array_values($latestRows);
+    }
+
+    private function isNewerForecastRow(array $candidate, array $current): bool
+    {
+        $revisionFields = [
+            ['forecastId', 'FORECAST_ID', 'forecast_id', 'ORDER_ID', 'orderId'],
+            ['detailId', 'DETAIL_ID', 'detail_id', 'DT1_ID', 'dt1Id'],
+            ['weeklyForecastNo', 'WEEKLY_FORECAST_NO', 'ORDER_NO', 'orderNo'],
+        ];
+
+        foreach ($revisionFields as $fields) {
+            $candidateRevision = $this->forecastRevisionNumber($this->forecastRowValue($candidate, $fields));
+            $currentRevision = $this->forecastRevisionNumber($this->forecastRowValue($current, $fields));
+
+            if ($candidateRevision !== null && $currentRevision !== null && $candidateRevision !== $currentRevision) {
+                return $candidateRevision > $currentRevision;
+            }
+        }
+
+        $candidateTimestamp = $this->forecastRevisionTimestamp($candidate);
+        $currentTimestamp = $this->forecastRevisionTimestamp($current);
+
+        if ($candidateTimestamp !== null && $currentTimestamp !== null && $candidateTimestamp !== $currentTimestamp) {
+            return $candidateTimestamp > $currentTimestamp;
+        }
+
+        // Keep the first row on a complete tie. The sproc normally returns
+        // newest rows first, and this prevents an older duplicate overwriting it.
+        return false;
+    }
+
+    private function forecastRowValue(array $row, array $keys, $default = null)
+    {
+        foreach ($keys as $key) {
+            if (array_key_exists($key, $row) && $row[$key] !== null && $row[$key] !== '') {
+                return $row[$key];
+            }
+        }
+
+        return $default;
+    }
+
+    private function forecastRevisionNumber($value): ?float
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if (is_numeric($value)) {
+            return (float) $value;
+        }
+
+        if (preg_match('/(\d+)\s*$/', (string) $value, $matches) === 1) {
+            return (float) $matches[1];
+        }
+
+        return null;
+    }
+
+    private function forecastRevisionTimestamp(array $row): ?int
+    {
+        $date = $this->forecastRowValue(
+            $row,
+            ['revisionDate', 'REVISION_DATE', 'DATE_STAMP', 'dateStamp', 'createdDate', 'CREATED_DATE']
+        );
+        $time = $this->forecastRowValue(
+            $row,
+            ['revisionTime', 'REVISION_TIME', 'TIME_STAMP', 'timeStamp'],
+            '00:00:00'
+        );
+
+        if ($date === null) {
+            return null;
+        }
+
+        $timestamp = strtotime(trim((string) $date) . ' ' . trim((string) $time));
+
+        return $timestamp === false ? null : $timestamp;
     }
 
     private function storePortalOrderCacheVersion(string $storeCode): string
@@ -230,12 +360,16 @@ class StorePortalOrderController extends Controller
             'startDate' => 'required|date',
             'endDate' => 'required|date|after_or_equal:startDate',
             'orderType' => 'required|in:WeeklyForecast',
+            'changedOnly' => 'nullable|boolean',
             'details' => 'required|array|min:1',
             'details.*.itemCode' => 'required|string',
             'details.*.itemName' => 'nullable|string',
+            'details.*.categCode' => 'nullable|string',
             'details.*.uomCode' => 'nullable|string',
             'details.*.deliveryDate' => 'required|date',
             'details.*.orderQty' => 'required|numeric|min:0',
+            'details.*.previousOrderQty' => 'nullable|numeric|min:0',
+            'details.*.isEdited' => 'nullable|boolean',
         ]);
 
         if ($validator->fails()) {
@@ -253,17 +387,40 @@ class StorePortalOrderController extends Controller
                 ?? optional($request->user())->name
                 ?? 'SYSTEM');
 
+        $startDate = Carbon::parse($request->startDate)->startOfDay();
+        $endDate = Carbon::parse($request->endDate)->startOfDay();
+
         $details = collect($request->details)
             ->filter(fn ($row) => !empty($row['itemCode']) && !empty($row['deliveryDate']))
-            ->map(function ($row) {
+            ->map(function ($row) use ($startDate, $endDate) {
+                $deliveryDate = Carbon::parse($row['deliveryDate'])->startOfDay();
+
+                // Today is valid. Only dates outside the selected header range
+                // are rejected so the SQL header and its detail rows stay aligned.
+                if ($deliveryDate->lt($startDate) || $deliveryDate->gt($endDate)) {
+                    throw new HttpResponseException(response()->json([
+                        'message' => 'A forecast detail date is outside the selected date range.',
+                        'errors' => [
+                            'deliveryDate' => $deliveryDate->toDateString(),
+                            'startDate' => $startDate->toDateString(),
+                            'endDate' => $endDate->toDateString(),
+                        ],
+                    ], 422));
+                }
+
                 return [
                     'itemCode' => trim((string) ($row['itemCode'] ?? '')),
                     'itemName' => trim((string) ($row['itemName'] ?? '')),
+                    'categCode' => trim((string) ($row['categCode'] ?? '')),
                     'uomCode' => trim((string) ($row['uomCode'] ?? '')),
-                    'deliveryDate' => Carbon::parse($row['deliveryDate'])->toDateString(),
+                    'deliveryDate' => $deliveryDate->toDateString(),
                     'orderQty' => (float) ($row['orderQty'] ?? 0),
+                    'previousOrderQty' => (float) ($row['previousOrderQty'] ?? 0),
+                    'isEdited' => (bool) ($row['isEdited'] ?? true),
                 ];
             })
+            // Keep only the last edit if a browser submits the same item/date twice.
+            ->keyBy(fn ($row) => strtoupper($row['itemCode']) . '|' . $row['deliveryDate'])
             ->values()
             ->all();
 
@@ -276,17 +433,19 @@ class StorePortalOrderController extends Controller
         $result = $this->execStorePortalSproc($request, 'SaveWeeklyForecast', [
             'userCode' => $userCode,
             'storeCode' => $request->storeCode,
-            'startDate' => Carbon::parse($request->startDate)->toDateString(),
-            'endDate' => Carbon::parse($request->endDate)->toDateString(),
+            'startDate' => $startDate->toDateString(),
+            'endDate' => $endDate->toDateString(),
             'orderType' => $request->orderType,
+            'changedOnly' => $request->boolean('changedOnly', true),
             'details' => $details,
         ]);
 
         $this->bumpStorePortalOrderCacheVersion($request->storeCode);
 
         return response()->json([
-            'message' => 'Weekly forecast submitted successfully.',
+            'message' => count($details) . ' forecast quantity change(s) saved successfully.',
             'data' => $result,
+            'savedDetails' => $details,
         ]);
     }
 
@@ -384,60 +543,6 @@ class StorePortalOrderController extends Controller
         return response()->json([
             'message' => 'Order confirmed and transmitted to NAYSA Financials successfully.',
             'data' => $result,
-        ]);
-    }
-
-    public function querySummary(Request $request)
-    {
-        $validator = Validator::make($request->all(), [
-            'startDate' => 'required|date',
-            'endDate' => 'required|date|after_or_equal:startDate',
-            'orderType' => 'required|in:WeeklyForecast,ConfirmedOrder',
-        ]);
-
-        if ($validator->fails()) {
-            return response()->json([
-                'message' => 'Invalid query parameters.',
-                'errors' => $validator->errors(),
-            ], 422);
-        }
-
-        $data = $this->execStorePortalSproc($request, 'QuerySummary', [
-            'startDate' => $request->startDate,
-            'endDate' => $request->endDate,
-            'orderType' => $request->orderType,
-        ]);
-
-        return response()->json([
-            'message' => 'Summary loaded successfully.',
-            'data' => $data,
-        ]);
-    }
-
-    public function queryDetail(Request $request)
-    {
-        $validator = Validator::make($request->all(), [
-            'startDate' => 'required|date',
-            'endDate' => 'required|date|after_or_equal:startDate',
-            'orderType' => 'required|in:WeeklyForecast,ConfirmedOrder',
-        ]);
-
-        if ($validator->fails()) {
-            return response()->json([
-                'message' => 'Invalid query parameters.',
-                'errors' => $validator->errors(),
-            ], 422);
-        }
-
-        $data = $this->execStorePortalSproc($request, 'QueryDetail', [
-            'startDate' => $request->startDate,
-            'endDate' => $request->endDate,
-            'orderType' => $request->orderType,
-        ]);
-
-        return response()->json([
-            'message' => 'Detail loaded successfully.',
-            'data' => $data,
         ]);
     }
 }

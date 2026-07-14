@@ -20,8 +20,3 @@ Route::prefix('store-portal')->group(function () {
     Route::post('/confirm-order', [StorePortalOrderController::class, 'confirmOrder']);
 });
 
-Route::prefix('commissary')->group(function () {
-    Route::get('/categories', [CommissaryController::class, 'getCategories']);
-    Route::get('/summary', [CommissaryController::class, 'getSummary']);
-    Route::get('/detailed', [CommissaryController::class, 'getDetailed']);
-});
