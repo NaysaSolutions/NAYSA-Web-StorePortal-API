@@ -4,6 +4,7 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\CommissaryController;
 use App\Http\Controllers\StorePortalOrderController;
+use App\Http\Controllers\StorePortalReceivingController;
 use App\Http\Controllers\SupplementaryOrderController;
 
 Route::post('/authorized-login', [AuthController::class, 'authorizedLogin']);
@@ -21,4 +22,7 @@ Route::prefix('store-portal')->group(function () {
     Route::post('/confirm-order', [StorePortalOrderController::class, 'confirmOrder']);
     Route::get('/supplementary', [SupplementaryOrderController::class, 'loadSupplementary']);
     Route::post('/supplementary-order', [SupplementaryOrderController::class, 'submitSupplementaryOrder']);
+    Route::get('/received-items', [StorePortalReceivingController::class, 'index']);
+    Route::post('/received-items', [StorePortalReceivingController::class, 'store']);
 });
+
